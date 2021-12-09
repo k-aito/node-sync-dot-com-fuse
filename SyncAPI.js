@@ -19,9 +19,8 @@ const hash = require('hash.js')
 // npm install sjcl
 const sjcl = require('sjcl')
 
-// npm install fuse-bindings (use node 8.17.0)
-// https://github.com/mafintosh/fuse-bindings
-const fuse = require('fuse-bindings')
+// npm install fuse-native
+const Fuse = require('fuse-native')
 
 // npm install scanf
 const scanf = require('scanf')
@@ -51,6 +50,8 @@ let GCM_PACKET_SIZE = 128 * 1024;
 let GCM_PAYLOAD_SIZE = 128 * 1024 - 36;
 let CHUNK_SIZE = 10485760
 
+// Buffering in percent of the file size
+let percentBuffering = 25
 
 /**
  * Workaround for modules not available in sjcl
@@ -933,8 +934,6 @@ let directories = []
 
 // Variables needed for read function
 var decryptedChunk
-// Buffering in percent of the file size
-let percentBuffering = 25
 // Buffering based on percent
 var sizeBuffering = 0
 // Comment percentBuffering
@@ -945,7 +944,7 @@ var lastDownloadOffset
 // If set to false we must buffering if it's set to true we increment downloadOffset
 var flagIncreaseDownloadOffset
 
-fuse.mount(mountPath, {
+const ops = {
   readdir: async function (path, cb) {
     //~ console.log('readdir(%s)', path)
     let values
@@ -1138,10 +1137,14 @@ fuse.mount(mountPath, {
       return cb(0)
     }
   }
-}, function (err) {
+}
+
+const fuse = new Fuse(mountPath, ops, { debug: false, force: true })
+fuse.mount(function (err) {
   if (err) throw err
   console.log('filesystem mounted on ' + mountPath)
 })
+
 
 process.on('SIGINT', function () {
   fuse.unmount(mountPath, function (err) {
