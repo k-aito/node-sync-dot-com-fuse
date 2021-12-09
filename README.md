@@ -37,3 +37,8 @@ Change the credentials in .env, create a mnt folder and run the application
 mkdir ./mnt/
 node ./SyncAPI.js
 ```
+
+# Credits
+
+All the codes related to sync.com (login, decrypt... are from sync.com website) and is available with the debugger.
+Big thanks to take the time to reading my questions and answer them.
