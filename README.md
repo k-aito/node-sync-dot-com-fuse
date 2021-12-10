@@ -37,6 +37,11 @@ Change the credentials in .env, create a mnt folder and run the application
 mkdir ./mnt/
 node ./SyncAPI.js
 ```
+# Issues
+
+* Buffering is not a good method because it's really slow
+* No multithreading for downloading chunks
+* Everything is in RAM right now, that can make problems with big files
 
 # Credits
 
