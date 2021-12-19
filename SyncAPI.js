@@ -878,7 +878,7 @@ async function download_decrypt_to_file(id) {
 
       // Decrypt asked chunk
       decryptedChunk = await decryptChunk(chunkEncrypted, datakey)
-      fileStream.write(decryptedChunk, downloadOffset)
+      fileStream.write(decryptedChunk)
 
       // Update downloadOffset and downloadLen
       downloadOffset += downloadLen
