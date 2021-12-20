@@ -848,23 +848,25 @@ async function decryptChunk(data_buffer_enc, datakey) {
 /**
  * Download and decrypt to file new
  */
-async function download_decrypt_to_file(id) {
+async function download_decrypt_to_file(id, fd) {
     // Variables for download chunk
     let getfile = await get(id)
     let filename = await filenameDecrypt(getfile['enc_name'])
     let size = getfile['size']
     let sizeTotal = (Math.ceil(size / GCM_PAYLOAD_SIZE) * 36) + size
 
-    console.log(filename)
+    //~ console.log(filename)
 
     let fullChunkSize = CHUNK_SIZE + GCM_PACKET_SIZE
 
     let downloadOffset = 0
     let downloadLen = (sizeTotal - downloadOffset) > fullChunkSize ? fullChunkSize : (sizeTotal - downloadOffset)
 
-    const fileStream = fs.createWriteStream(filename)
-    
-    while((sizeTotal - downloadOffset) > 0) {
+    //~ const fileStream = fs.createWriteStream(filename)
+    const fileStream = fs.createWriteStream(null, {fd: fd})
+
+    let flagWhile = true
+    while( ((sizeTotal - downloadOffset) > 0) && (flagWhile == true) ) {
       // Download chunk
       let chunkEncrypted = await downloadChunk(getfile, downloadOffset, downloadLen)
 
@@ -878,12 +880,25 @@ async function download_decrypt_to_file(id) {
 
       // Decrypt asked chunk
       decryptedChunk = await decryptChunk(chunkEncrypted, datakey)
+
+      // Handle error
+      fileStream.on("error", function(err) {
+        // Don't care about any errors for now
+        // TODO only skip if err code is EBADF
+        if(err) {
+          //~ console.log("Change flagWhile because callback")
+          flagWhile = false
+        }
+      })
+
+      // Write decryptedChunk
       fileStream.write(decryptedChunk)
 
       // Update downloadOffset and downloadLen
       downloadOffset += downloadLen
       downloadLen = (sizeTotal - downloadOffset) > fullChunkSize ? fullChunkSize : (sizeTotal - downloadOffset)
     }
+
 }
 
 
@@ -931,18 +946,6 @@ async function download_decrypt_chunk(id, offset) {
 let mountPath = process.platform !== 'win32' ? './mnt' : 'M:\\'
 let vaultID = infos[0]['web_sync_id']
 let directories = []
-
-// Variables needed for read function
-var decryptedChunk
-// Buffering based on percent
-var sizeBuffering = 0
-// Comment percentBuffering
-// And comment "sizeBuffering = 0" if you want use buffering based on size
-// Replace x by the amount of MB you wan buffer
-// var sizeBuffering =  x * 1024 * 1024
-var lastDownloadOffset
-// If set to false we must buffering if it's set to true we increment downloadOffset
-var flagIncreaseDownloadOffset
 
 const ops = {
   readdir: async function (path, cb) {
@@ -1034,107 +1037,44 @@ const ops = {
     cb(fuse.ENOENT)
   },
   open: function (path, flags, cb) {
-    console.log('open(%s, %d)', path, flags)
-
-    // It can happen it start a file when we not want and first action is buffering
-    // It's a way to exit properly the action without the need to wait
-    console.log("Do you want to buffer (any other answer than 'y' will abort the read operation): ")
-    let bufferAsk = scanf('%s')
-
-    // If we not want buffer send error "-1"
-    if(bufferAsk != 'y') return cb(-1)
-
-    // Reset variables needed for read
-    decryptedChunk = Buffer('')
-    lastDownloadOffset = 0
-    flagIncreaseDownloadOffset = false
-
-    // If sizeBuffering is 0
-    // Define it with percentBuffering and the file size
-    if ( percentBuffering ) {
-      let path_b64 = new Buffer(path).toString('base64')
-      let sizeFile = directories[path_b64]['size']
-      let sizeTotal = (Math.ceil(sizeFile / GCM_PAYLOAD_SIZE) * 36) + sizeFile
-      //~ console.log("sizeTotal: " + sizeTotal)
-      //~ console.log("Math.ceil(sizeTotal/100): " + Math.ceil(sizeTotal/100))
-      sizeBuffering = Math.ceil(sizeTotal/100) * percentBuffering
-    }
-
-    cb(0, 42)
-  },
-  read: async function (path, fd, buf, len, pos, cb) {
-    console.log('read(%s, %d, %d, %d)', path, fd, len, pos)
+    //~ console.log('open(%s, %d)', path, flags)
 
     // Define variables to ease code
     let path_b64 = new Buffer(path).toString('base64')
-    let sizeFile = directories[path_b64]['size']
-    let sizeTotal = (Math.ceil(sizeFile / GCM_PAYLOAD_SIZE) * 36) + sizeFile
     let id =  directories[path_b64]['id']
-    let fullChunkSize = CHUNK_SIZE + GCM_PACKET_SIZE
+  
+    let fd = fs.openSync('./' + path_b64, 'w+')
 
-    // Carefull with the sizeBuffering because if the we are at the end of the file we cannot buffer
-    let estimatedSizeBuffering = sizeBuffering < sizeFile ? sizeBuffering : sizeFile
-
-    // Start downloading for buffering first later we only add chunk by chunk when we read
-
-    // Only buffering (we compare in bytes) at start
-    // After we download the next chunk until the end while reading
-    if (flagIncreaseDownloadOffset == false) {
-      // Convert pos to posEncrypted
-      // pos is the offset in the decrypted file we need to add the aad content to it to have posEncrypted
-      let posEncrypted = pos + (Math.ceil(pos / GCM_PAYLOAD_SIZE) * 36)
-      //~ console.log("Math.ceil(pos / GCM_PAYLOAD_SIZE): " + Math.ceil(pos / GCM_PAYLOAD_SIZE))
-      //~ console.log("GCM_PAYLOAD_SIZE: " + GCM_PAYLOAD_SIZE)
-
-      // Define number of GCM paquet we already get
-      // It will be used to define the chunk that we need to download
-      // Each fullChunkSize can contain 81 GCM packets
-      // TODO what happen at end of file???
-      let downloadOffset = Math.floor(Math.ceil(posEncrypted / GCM_PACKET_SIZE) / 81) * fullChunkSize
-
-      // Debug
-      console.log("Estimated buffer size: " + estimatedSizeBuffering)
-
-      while ( decryptedChunk.length < estimatedSizeBuffering) {
-        // Info related to the buffering
-        console.log("Buffering: " + lastDownloadOffset + "/" + estimatedSizeBuffering)
-
-        // Download chunk
-        if(flagIncreaseDownloadOffset) {
-          downloadOffset += fullChunkSize
-          lastDownloadOffset = downloadOffset
-          decryptedChunk = Buffer.concat([decryptedChunk, await download_decrypt_chunk(id, downloadOffset)])
-        } else {
-          decryptedChunk = Buffer.concat([decryptedChunk, await download_decrypt_chunk(id, downloadOffset)])
-          lastDownloadOffset = downloadOffset
-          flagIncreaseDownloadOffset = true
-        }
-      }
-    } else {
-      // First read all what we can download again later so we will download new chunk and have advance in reads
-      // Because we not discarding anymore use pos+len instead of len
-      //~ if( decryptedChunk.length < len ) {
-      if( decryptedChunk.length < (pos+len) ) {
-        downloadOffset = lastDownloadOffset + fullChunkSize
-        lastDownloadOffset = downloadOffset
-        // Download only if lastDownloadOffset + fullChunkSize < sizeTotal
-        if ( lastDownloadOffset < sizeTotal ) {
-          decryptedChunk = Buffer.concat([decryptedChunk, await download_decrypt_chunk(id, downloadOffset)])
-        }
-      }
+    try {
+      download_decrypt_to_file(id, fd)
+    } catch (e) {
+      console.log("--")
+      console.log(e)
+      console.log("--")
     }
 
-    // Read the asked part from decryptedChunk
-    // Discarding parts make having a weird behavior for now just keep everything
-    // We will see if it's too much on memory later or not
-    //~ let decryptPart = decryptedChunk.slice(0, len)
-    //~ decryptedChunk = decryptedChunk.slice(len)
-    let decryptPart = decryptedChunk.slice(pos, pos+len)
-    if(decryptPart.length > 0) {
-      buf.fill(decryptPart)
-      cb(decryptPart.length)
-    } else {
-      return cb(0)
+    cb(0, fd)
+  },
+  release: function (path, fd, cb) {
+    //~ console.log('release(%s, %d)', path, fd)
+    fs.close(fd)
+
+    // Define variables to ease code
+    let path_b64 = new Buffer(path).toString('base64')
+    fs.rmSync(path_b64)
+
+    return cb(0)
+  },
+  read: function (path, fd, buf, len, pos, cb) {
+    //~ console.log('read(%s, %d, %d, %d)', path, fd, len, pos)
+
+    try {
+      let readLen = fs.readSync(fd, buf, 0, len, pos)
+      if(readLen > 0) return cb(readLen)
+    } catch (e) {
+      console.log("--")
+      console.log(e)
+      console.log("--")
     }
   }
 }
