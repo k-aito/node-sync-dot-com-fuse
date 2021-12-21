@@ -53,6 +53,13 @@ let CHUNK_SIZE = 10485760
 // Buffering in percent of the file size
 let percentBuffering = 25
 
+
+/**
+ * Sleep method
+ */
+const sleep = (waitTimeInMs) => new Promise(resolve => setTimeout(resolve, waitTimeInMs));
+
+
 /**
  * Workaround for modules not available in sjcl
  */
@@ -865,7 +872,18 @@ async function download_decrypt_to_file(id, fd) {
     //~ const fileStream = fs.createWriteStream(filename)
     const fileStream = fs.createWriteStream(null, {fd: fd})
 
+    // Handle error
+    fileStream.on("error", function(err) {
+      // Don't care about any errors for now
+      // TODO only skip if err code is EBADF
+      if(err) {
+        //~ console.log("Change flagWhile because callback")
+        flagWhile = false
+      }
+    })
+
     let flagWhile = true
+
     while( ((sizeTotal - downloadOffset) > 0) && (flagWhile == true) ) {
       // Download chunk
       let chunkEncrypted = await downloadChunk(getfile, downloadOffset, downloadLen)
@@ -880,16 +898,6 @@ async function download_decrypt_to_file(id, fd) {
 
       // Decrypt asked chunk
       decryptedChunk = await decryptChunk(chunkEncrypted, datakey)
-
-      // Handle error
-      fileStream.on("error", function(err) {
-        // Don't care about any errors for now
-        // TODO only skip if err code is EBADF
-        if(err) {
-          //~ console.log("Change flagWhile because callback")
-          flagWhile = false
-        }
-      })
 
       // Write decryptedChunk
       fileStream.write(decryptedChunk)
@@ -1037,45 +1045,62 @@ const ops = {
     cb(fuse.ENOENT)
   },
   open: function (path, flags, cb) {
-    //~ console.log('open(%s, %d)', path, flags)
+    console.log('open(%s, %d)', path, flags)
 
     // Define variables to ease code
     let path_b64 = new Buffer(path).toString('base64')
     let id =  directories[path_b64]['id']
   
     let fd = fs.openSync('./' + path_b64, 'w+')
-
-    try {
-      download_decrypt_to_file(id, fd)
-    } catch (e) {
-      console.log("--")
-      console.log(e)
-      console.log("--")
-    }
+    download_decrypt_to_file(id, fd)
 
     cb(0, fd)
   },
-  release: function (path, fd, cb) {
-    //~ console.log('release(%s, %d)', path, fd)
-    fs.close(fd)
+  read: async function (path, fd, buf, len, pos, cb) {
+    console.log('read(%s, %d, %d, %d)', path, fd, len, pos)
+
+    // Define variables to ease code
+    let path_b64  = new Buffer(path).toString('base64')
+    let size      =  directories[path_b64]['size']
+
+    // Sleep until we get enough readLen
+    while(true) {
+      // Try to read and set in data buffer (so we fill buf only when needed)
+      let data = Buffer.alloc(len)
+      try {
+        let readLen = fs.readSync(fd, data, 0, len, pos)
+
+        if(readLen == len) {
+          //~ console.log("READ LEN: " + readLen)
+          buf.fill(data)
+          return cb(readLen)
+        } else if((pos+len) > size) {
+          // End of file
+          //~ console.log("END OF FILE")
+          // Too much from data buffer
+          let dataRest = (pos+len) - size
+          buf.fill(data.slice(0, (len-dataRest)))
+          return cb(data.length)
+        } else {
+          //~ console.log("Wait for 1s")
+          await sleep(1000)
+        }
+      } catch (e) {
+        // TODO proper error managing
+        // For now diplay them and use the e.code to keep the software that use the file updated about the status
+        console.log(e)
+        return cb(e.code)
+      }
+    }
+  },
+  flush: function (path, fd, cb) {
+    console.log('flush(%s, %d)', path, fd)
 
     // Define variables to ease code
     let path_b64 = new Buffer(path).toString('base64')
     fs.rmSync(path_b64)
 
     return cb(0)
-  },
-  read: function (path, fd, buf, len, pos, cb) {
-    //~ console.log('read(%s, %d, %d, %d)', path, fd, len, pos)
-
-    try {
-      let readLen = fs.readSync(fd, buf, 0, len, pos)
-      if(readLen > 0) return cb(readLen)
-    } catch (e) {
-      console.log("--")
-      console.log(e)
-      console.log("--")
-    }
   }
 }
 
