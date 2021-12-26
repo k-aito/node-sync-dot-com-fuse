@@ -42,9 +42,11 @@ const fs = require('fs');
  * Variables
  */ 
 
-const api_url = 'https://cp.sync.com/api/?command='
-const username = process.env.EMAIL
-const password = process.env.PASSWORD
+const api_url     = 'https://cp.sync.com/api/?command='
+const username    = process.env.EMAIL
+const password    = process.env.PASSWORD
+const mtSpeed     = process.env.MTSPEED
+const retryCount  = process.env.RETRYCOUNT
 
 let GCM_PACKET_SIZE = 128 * 1024;
 let GCM_PAYLOAD_SIZE = 128 * 1024 - 36;
@@ -52,6 +54,13 @@ let CHUNK_SIZE = 10485760
 
 // Buffering in percent of the file size
 let percentBuffering = 25
+
+
+/**
+ * Sleep method
+ */
+const sleep = (waitTimeInMs) => new Promise(resolve => setTimeout(resolve, waitTimeInMs));
+
 
 /**
  * Workaround for modules not available in sjcl
@@ -848,41 +857,80 @@ async function decryptChunk(data_buffer_enc, datakey) {
 /**
  * Download and decrypt to file new
  */
-async function download_decrypt_to_file(id) {
+async function download_decrypt_to_file(id, fd) {
     // Variables for download chunk
     let getfile = await get(id)
     let filename = await filenameDecrypt(getfile['enc_name'])
     let size = getfile['size']
     let sizeTotal = (Math.ceil(size / GCM_PAYLOAD_SIZE) * 36) + size
 
-    console.log(filename)
+    //~ console.log(filename)
 
-    let fullChunkSize = CHUNK_SIZE + GCM_PACKET_SIZE
+    //~ let fullChunkSize = CHUNK_SIZE + GCM_PACKET_SIZE
+    let fullChunkSize = GCM_PACKET_SIZE
 
     let downloadOffset = 0
     let downloadLen = (sizeTotal - downloadOffset) > fullChunkSize ? fullChunkSize : (sizeTotal - downloadOffset)
 
-    const fileStream = fs.createWriteStream(filename)
-    
-    while((sizeTotal - downloadOffset) > 0) {
+    //~ const fileStream = fs.createWriteStream(filename)
+    const fileStream = fs.createWriteStream(null, {fd: fd})
+
+    // Handle error
+    fileStream.on("error", function(err) {
+      // Don't care about any errors for now
+      // TODO only skip if err code is EBADF
+      if(err) {
+        console.log(err)
+        if(err.code == "EBADF") flagWhile = false
+      }
+    })
+
+    let flagWhile = true
+    // For 1 CHUNK_SIZE it's about 81 GCM_PACKET_SIZE
+    let nbMT = 81 * mtSpeed
+    let listMT = []
+
+    // Variables needed for decryption
+    let data = await getData([getfile])
+    let datakey_id = getfile['id']
+    let sharekey_id = data['datakeys'][datakey_id]['share_key_id']
+    let sharekey_dec = await sharekeyDecrypt(data['sharekeys'][sharekey_id], sharekey_id)
+    let datakey_enc = data['datakeys'][datakey_id]['enc_data_key']
+    let datakey = await datakeyDecrypt(datakey_enc, sharekey_dec)
+
+    async function multithread(getfile, downloadOffset, downloadLen) {
       // Download chunk
       let chunkEncrypted = await downloadChunk(getfile, downloadOffset, downloadLen)
+      return await decryptChunk(chunkEncrypted, datakey)
+    }
 
-      // Variables needed for decryption
-      let data = await getData([getfile])
-      let datakey_id = getfile['id']
-      let sharekey_id = data['datakeys'][datakey_id]['share_key_id']
-      let sharekey_dec = await sharekeyDecrypt(data['sharekeys'][sharekey_id], sharekey_id)
-      let datakey_enc = data['datakeys'][datakey_id]['enc_data_key']
-      let datakey = await datakeyDecrypt(datakey_enc, sharekey_dec)
+    while( ((sizeTotal - downloadOffset) > 0) && (flagWhile == true) ) {
+      for(let i = 0; i < nbMT; i = i + 1) {
+        // Quit if downloadLen == 0 it means we not have anymore to download
+        if (downloadLen == 0) {
+          break
+        }
 
-      // Decrypt asked chunk
-      decryptedChunk = await decryptChunk(chunkEncrypted, datakey)
-      fileStream.write(decryptedChunk, downloadOffset)
+        // Launch process
+        //~ console.log("multithread(" + getfile + ", " + downloadOffset + ", "+ downloadLen + ")")
+        listMT.push(multithread(getfile, downloadOffset, downloadLen))
 
-      // Update downloadOffset and downloadLen
-      downloadOffset += downloadLen
-      downloadLen = (sizeTotal - downloadOffset) > fullChunkSize ? fullChunkSize : (sizeTotal - downloadOffset)
+        // Update downloadOffset and downloadLen
+        downloadOffset += downloadLen
+        downloadLen = (sizeTotal - downloadOffset) > fullChunkSize ? fullChunkSize : (sizeTotal - downloadOffset)
+        //~ console.log("downloadOffset: " +  downloadOffset)
+        //~ console.log("downloadLen: " +  downloadLen)
+      }
+
+      for(let i = 0; i < nbMT; i = i + 1) {
+        // Write decryptedChunk
+        //~ console.log("Wait for " + i)
+        let data = await listMT.shift()
+        // Write only if data != undefined
+        if(data != undefined) {
+          fileStream.write(data)
+        }
+      }
     }
 }
 
@@ -932,21 +980,9 @@ let mountPath = process.platform !== 'win32' ? './mnt' : 'M:\\'
 let vaultID = infos[0]['web_sync_id']
 let directories = []
 
-// Variables needed for read function
-var decryptedChunk
-// Buffering based on percent
-var sizeBuffering = 0
-// Comment percentBuffering
-// And comment "sizeBuffering = 0" if you want use buffering based on size
-// Replace x by the amount of MB you wan buffer
-// var sizeBuffering =  x * 1024 * 1024
-var lastDownloadOffset
-// If set to false we must buffering if it's set to true we increment downloadOffset
-var flagIncreaseDownloadOffset
-
 const ops = {
   readdir: async function (path, cb) {
-    //~ console.log('readdir(%s)', path)
+    console.log('readdir(%s)', path)
     let values
     let path_modified
 
@@ -984,7 +1020,7 @@ const ops = {
 
     return cb(0, listArray)
   },
-  getattr: function (path, cb) {
+  getattr: async function (path, cb) {
     //~ console.log('getattr(%s)', path)
 
     if (path === '/') {
@@ -1033,113 +1069,80 @@ const ops = {
 
     cb(fuse.ENOENT)
   },
-  open: function (path, flags, cb) {
+  open: async function (path, flags, cb) {
     console.log('open(%s, %d)', path, flags)
 
-    // It can happen it start a file when we not want and first action is buffering
-    // It's a way to exit properly the action without the need to wait
-    console.log("Do you want to buffer (any other answer than 'y' will abort the read operation): ")
-    let bufferAsk = scanf('%s')
+    // Define variables to ease code
+    let path_b64 = new Buffer(path).toString('base64')
+    let id =  directories[path_b64]['id']
+  
+    let fd = fs.openSync('./' + path_b64, 'w+')
+    download_decrypt_to_file(id, fd)
 
-    // If we not want buffer send error "-1"
-    if(bufferAsk != 'y') return cb(-1)
-
-    // Reset variables needed for read
-    decryptedChunk = Buffer('')
-    lastDownloadOffset = 0
-    flagIncreaseDownloadOffset = false
-
-    // If sizeBuffering is 0
-    // Define it with percentBuffering and the file size
-    if ( percentBuffering ) {
-      let path_b64 = new Buffer(path).toString('base64')
-      let sizeFile = directories[path_b64]['size']
-      let sizeTotal = (Math.ceil(sizeFile / GCM_PAYLOAD_SIZE) * 36) + sizeFile
-      //~ console.log("sizeTotal: " + sizeTotal)
-      //~ console.log("Math.ceil(sizeTotal/100): " + Math.ceil(sizeTotal/100))
-      sizeBuffering = Math.ceil(sizeTotal/100) * percentBuffering
-    }
-
-    cb(0, 42)
+    cb(0, fd)
   },
   read: async function (path, fd, buf, len, pos, cb) {
     console.log('read(%s, %d, %d, %d)', path, fd, len, pos)
 
     // Define variables to ease code
-    let path_b64 = new Buffer(path).toString('base64')
-    let sizeFile = directories[path_b64]['size']
-    let sizeTotal = (Math.ceil(sizeFile / GCM_PAYLOAD_SIZE) * 36) + sizeFile
-    let id =  directories[path_b64]['id']
-    let fullChunkSize = CHUNK_SIZE + GCM_PACKET_SIZE
+    let path_b64  = new Buffer(path).toString('base64')
+    let size      =  directories[path_b64]['size']
 
-    // Carefull with the sizeBuffering because if the we are at the end of the file we cannot buffer
-    let estimatedSizeBuffering = sizeBuffering < sizeFile ? sizeBuffering : sizeFile
+    // Prepare a retry count
+    let retry = 0
+    while(retry < retryCount) {
+      // Try to read and set in data buffer (so we fill buf only when needed)
+      let data = Buffer.alloc(len)
+      try {
+        let readLen = fs.readSync(fd, data, 0, len, pos)
 
-    // Start downloading for buffering first later we only add chunk by chunk when we read
-
-    // Only buffering (we compare in bytes) at start
-    // After we download the next chunk until the end while reading
-    if (flagIncreaseDownloadOffset == false) {
-      // Convert pos to posEncrypted
-      // pos is the offset in the decrypted file we need to add the aad content to it to have posEncrypted
-      let posEncrypted = pos + (Math.ceil(pos / GCM_PAYLOAD_SIZE) * 36)
-      //~ console.log("Math.ceil(pos / GCM_PAYLOAD_SIZE): " + Math.ceil(pos / GCM_PAYLOAD_SIZE))
-      //~ console.log("GCM_PAYLOAD_SIZE: " + GCM_PAYLOAD_SIZE)
-
-      // Define number of GCM paquet we already get
-      // It will be used to define the chunk that we need to download
-      // Each fullChunkSize can contain 81 GCM packets
-      // TODO what happen at end of file???
-      let downloadOffset = Math.floor(Math.ceil(posEncrypted / GCM_PACKET_SIZE) / 81) * fullChunkSize
-
-      // Debug
-      console.log("Estimated buffer size: " + estimatedSizeBuffering)
-
-      while ( decryptedChunk.length < estimatedSizeBuffering) {
-        // Info related to the buffering
-        console.log("Buffering: " + lastDownloadOffset + "/" + estimatedSizeBuffering)
-
-        // Download chunk
-        if(flagIncreaseDownloadOffset) {
-          downloadOffset += fullChunkSize
-          lastDownloadOffset = downloadOffset
-          decryptedChunk = Buffer.concat([decryptedChunk, await download_decrypt_chunk(id, downloadOffset)])
+        if(readLen == len) {
+          //~ console.log("READ LEN: " + readLen)
+          buf.fill(data)
+          return cb(readLen)
+        } else if((pos+len) > size) {
+          // End of file
+          //~ console.log("END OF FILE")
+          // Too much from data buffer
+          let dataRest = (pos+len) - size
+          buf.fill(data.slice(0, (len-dataRest)))
+          return cb(data.length)
         } else {
-          decryptedChunk = Buffer.concat([decryptedChunk, await download_decrypt_chunk(id, downloadOffset)])
-          lastDownloadOffset = downloadOffset
-          flagIncreaseDownloadOffset = true
+          console.log('retry read %d: (%s, %d, %d, %d)', retry, path, fd, len, pos)
+          await sleep(1000)
+          retry = retry + 1
         }
-      }
-    } else {
-      // First read all what we can download again later so we will download new chunk and have advance in reads
-      // Because we not discarding anymore use pos+len instead of len
-      //~ if( decryptedChunk.length < len ) {
-      if( decryptedChunk.length < (pos+len) ) {
-        downloadOffset = lastDownloadOffset + fullChunkSize
-        lastDownloadOffset = downloadOffset
-        // Download only if lastDownloadOffset + fullChunkSize < sizeTotal
-        if ( lastDownloadOffset < sizeTotal ) {
-          decryptedChunk = Buffer.concat([decryptedChunk, await download_decrypt_chunk(id, downloadOffset)])
-        }
+      } catch (e) {
+        // TODO proper error managing
+        // For now diplay them and use the e.code to keep the software that use the file updated about the status
+        console.log(e)
+        return cb(e.code)
       }
     }
 
-    // Read the asked part from decryptedChunk
-    // Discarding parts make having a weird behavior for now just keep everything
-    // We will see if it's too much on memory later or not
-    //~ let decryptPart = decryptedChunk.slice(0, len)
-    //~ decryptedChunk = decryptedChunk.slice(len)
-    let decryptPart = decryptedChunk.slice(pos, pos+len)
-    if(decryptPart.length > 0) {
-      buf.fill(decryptPart)
-      cb(decryptPart.length)
-    } else {
-      return cb(0)
-    }
+    // If after the retry it's still busy answer with EIO error
+    // Returned from read(2) operations when the kernel's request is too large for the provided buffer.
+    return cb(fuse.EIO)
+  },
+  release: function (path, fd, cb) {
+    console.log('release(%s, %d)', path, fd)
+
+    // Define variables to ease code
+    let path_b64 = new Buffer(path).toString('base64')
+    fs.rmSync(path_b64)
+
+    return cb(0)
   }
 }
 
-const fuse = new Fuse(mountPath, ops, { debug: false, force: true })
+// Use GCM_PACKET_SIZE when possible because each thread download 1 GCM_PACKET_SIZE
+const fuse = new Fuse(mountPath, ops, {
+  debug: false,
+  force: true,
+  maxRead: GCM_PACKET_SIZE,
+  maxReadahead: GCM_PACKET_SIZE
+})
+
 fuse.mount(function (err) {
   if (err) throw err
   console.log('filesystem mounted on ' + mountPath)
@@ -1154,6 +1157,7 @@ process.on('SIGINT', function () {
       console.log('filesystem at ' + mountPath + ' unmounted')
     }
   })
+  process.exit()
 })
 
 })()
