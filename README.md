@@ -1,9 +1,14 @@
 # node-sync-dot-com-fuse
 FUSE file system for sync.com
 
+# Disclaimer
+
+This software is not supported by sync.com and is still very experimental.
+I will not be responsible for any data loss other issues.
+
 # Installation Linux
 
-## Debian
+## Debian Buster
 
 Install git
 
@@ -30,18 +35,38 @@ Install the needed NPM modules
 npm install
 ```
 
-Change the credentials in .env, create a mnt folder and run the application
+Create ./mnt folder and copy .env.example, change the credentials and run the application.
 
 ```bash
-# Edit .env
 mkdir ./mnt/
+cp ./.env.example ./.env
+# Edit .env
 node ./SyncAPI.js
 ```
 # Issues
 
-* Buffering is not a good method because it's really slow
-* No multithreading for downloading chunks
-* Everything is in RAM right now, that can make problems with big files
+* Right now I use a cache file (you must have enough free space for the file you will read), so it means the read must be sequential and not blocking.
+  * VLC is playing with release the file and have a weird behavior, so it fails.
+  * Reading picture is similar because they read the end of file at a time.
+* When the file descriptor is released, I remove the cache file. If there is access later like on VLC it fails too.
+* There is no throttling right now, so sometimes there are NGINX issues. I think it's related because I do to many requests to fast.
+* It can be impossible to browse when reading if you use too much "threads".
+
+# Tested
+
+* Linux (Debian Buster)
+  * Reading video file with MPV
+    * There is like a read ahead at start, but it doesn't care when reading further
+  * Copying file
+
+# To-do
+
+* Implement upload
+* Implement move
+* Implement delete
+* Implement throttling for download
+* Find a way to download the needed chunk instead of sequentially
+* Find a way to remove the cache file
 
 # Credits
 
