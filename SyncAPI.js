@@ -42,9 +42,11 @@ const fs = require('fs');
  * Variables
  */ 
 
-const api_url = 'https://cp.sync.com/api/?command='
-const username = process.env.EMAIL
-const password = process.env.PASSWORD
+const api_url     = 'https://cp.sync.com/api/?command='
+const username    = process.env.EMAIL
+const password    = process.env.PASSWORD
+const mtSpeed     = process.env.MTSPEED
+const retryCount  = process.env.RETRYCOUNT
 
 let GCM_PACKET_SIZE = 128 * 1024;
 let GCM_PAYLOAD_SIZE = 128 * 1024 - 36;
@@ -864,7 +866,8 @@ async function download_decrypt_to_file(id, fd) {
 
     //~ console.log(filename)
 
-    let fullChunkSize = CHUNK_SIZE + GCM_PACKET_SIZE
+    //~ let fullChunkSize = CHUNK_SIZE + GCM_PACKET_SIZE
+    let fullChunkSize = GCM_PACKET_SIZE
 
     let downloadOffset = 0
     let downloadLen = (sizeTotal - downloadOffset) > fullChunkSize ? fullChunkSize : (sizeTotal - downloadOffset)
@@ -877,36 +880,58 @@ async function download_decrypt_to_file(id, fd) {
       // Don't care about any errors for now
       // TODO only skip if err code is EBADF
       if(err) {
-        //~ console.log("Change flagWhile because callback")
-        flagWhile = false
+        console.log(err)
+        if(err.code == "EBADF") flagWhile = false
       }
     })
 
     let flagWhile = true
+    // For 1 CHUNK_SIZE it's about 81 GCM_PACKET_SIZE
+    let nbMT = 81 * mtSpeed
+    let listMT = []
 
-    while( ((sizeTotal - downloadOffset) > 0) && (flagWhile == true) ) {
+    // Variables needed for decryption
+    let data = await getData([getfile])
+    let datakey_id = getfile['id']
+    let sharekey_id = data['datakeys'][datakey_id]['share_key_id']
+    let sharekey_dec = await sharekeyDecrypt(data['sharekeys'][sharekey_id], sharekey_id)
+    let datakey_enc = data['datakeys'][datakey_id]['enc_data_key']
+    let datakey = await datakeyDecrypt(datakey_enc, sharekey_dec)
+
+    async function multithread(getfile, downloadOffset, downloadLen) {
       // Download chunk
       let chunkEncrypted = await downloadChunk(getfile, downloadOffset, downloadLen)
-
-      // Variables needed for decryption
-      let data = await getData([getfile])
-      let datakey_id = getfile['id']
-      let sharekey_id = data['datakeys'][datakey_id]['share_key_id']
-      let sharekey_dec = await sharekeyDecrypt(data['sharekeys'][sharekey_id], sharekey_id)
-      let datakey_enc = data['datakeys'][datakey_id]['enc_data_key']
-      let datakey = await datakeyDecrypt(datakey_enc, sharekey_dec)
-
-      // Decrypt asked chunk
-      decryptedChunk = await decryptChunk(chunkEncrypted, datakey)
-
-      // Write decryptedChunk
-      fileStream.write(decryptedChunk)
-
-      // Update downloadOffset and downloadLen
-      downloadOffset += downloadLen
-      downloadLen = (sizeTotal - downloadOffset) > fullChunkSize ? fullChunkSize : (sizeTotal - downloadOffset)
+      return await decryptChunk(chunkEncrypted, datakey)
     }
 
+    while( ((sizeTotal - downloadOffset) > 0) && (flagWhile == true) ) {
+      for(let i = 0; i < nbMT; i = i + 1) {
+        // Quit if downloadLen == 0 it means we not have anymore to download
+        if (downloadLen == 0) {
+          break
+        }
+
+        // Launch process
+        //~ console.log("multithread(" + getfile + ", " + downloadOffset + ", "+ downloadLen + ")")
+        listMT.push(multithread(getfile, downloadOffset, downloadLen))
+
+        // Update downloadOffset and downloadLen
+        downloadOffset += downloadLen
+        downloadLen = (sizeTotal - downloadOffset) > fullChunkSize ? fullChunkSize : (sizeTotal - downloadOffset)
+        //~ console.log("downloadOffset: " +  downloadOffset)
+        //~ console.log("downloadLen: " +  downloadLen)
+      }
+
+      for(let i = 0; i < nbMT; i = i + 1) {
+        // Write decryptedChunk
+        //~ console.log("Wait for " + i)
+        let data = await listMT.shift()
+        // Write only if data != undefined
+        if(data != undefined) {
+          fileStream.write(data)
+        }
+      }
+    }
 }
 
 
@@ -957,7 +982,7 @@ let directories = []
 
 const ops = {
   readdir: async function (path, cb) {
-    //~ console.log('readdir(%s)', path)
+    console.log('readdir(%s)', path)
     let values
     let path_modified
 
@@ -995,7 +1020,7 @@ const ops = {
 
     return cb(0, listArray)
   },
-  getattr: function (path, cb) {
+  getattr: async function (path, cb) {
     //~ console.log('getattr(%s)', path)
 
     if (path === '/') {
@@ -1044,7 +1069,7 @@ const ops = {
 
     cb(fuse.ENOENT)
   },
-  open: function (path, flags, cb) {
+  open: async function (path, flags, cb) {
     console.log('open(%s, %d)', path, flags)
 
     // Define variables to ease code
@@ -1063,8 +1088,9 @@ const ops = {
     let path_b64  = new Buffer(path).toString('base64')
     let size      =  directories[path_b64]['size']
 
-    // Sleep until we get enough readLen
-    while(true) {
+    // Prepare a retry count
+    let retry = 0
+    while(retry < retryCount) {
       // Try to read and set in data buffer (so we fill buf only when needed)
       let data = Buffer.alloc(len)
       try {
@@ -1082,8 +1108,9 @@ const ops = {
           buf.fill(data.slice(0, (len-dataRest)))
           return cb(data.length)
         } else {
-          //~ console.log("Wait for 1s")
+          console.log('retry read %d: (%s, %d, %d, %d)', retry, path, fd, len, pos)
           await sleep(1000)
+          retry = retry + 1
         }
       } catch (e) {
         // TODO proper error managing
@@ -1092,9 +1119,13 @@ const ops = {
         return cb(e.code)
       }
     }
+
+    // If after the retry it's still busy answer with EIO error
+    // Returned from read(2) operations when the kernel's request is too large for the provided buffer.
+    return cb(fuse.EIO)
   },
-  flush: function (path, fd, cb) {
-    console.log('flush(%s, %d)', path, fd)
+  release: function (path, fd, cb) {
+    console.log('release(%s, %d)', path, fd)
 
     // Define variables to ease code
     let path_b64 = new Buffer(path).toString('base64')
@@ -1104,7 +1135,14 @@ const ops = {
   }
 }
 
-const fuse = new Fuse(mountPath, ops, { debug: false, force: true })
+// Use GCM_PACKET_SIZE when possible because each thread download 1 GCM_PACKET_SIZE
+const fuse = new Fuse(mountPath, ops, {
+  debug: false,
+  force: true,
+  maxRead: GCM_PACKET_SIZE,
+  maxReadahead: GCM_PACKET_SIZE
+})
+
 fuse.mount(function (err) {
   if (err) throw err
   console.log('filesystem mounted on ' + mountPath)
@@ -1119,6 +1157,7 @@ process.on('SIGINT', function () {
       console.log('filesystem at ' + mountPath + ' unmounted')
     }
   })
+  process.exit()
 })
 
 })()
