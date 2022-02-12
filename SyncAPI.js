@@ -222,7 +222,7 @@ async function authenticate(usernameRaw, password) {
  * @param  {integer=} sync_id      The pid to get the path listing for.
  * @param  {integer=} hist_id      The current hist id that we have.
  * @param  {integer=} show_deleted switch to show deleted files, 1 = yes
- * @returns {Promise} The promise from the API call
+ * @returns {pathlist} the pathlist that contains all the path
  */
 async function list(sync_id, hist_id=0, showdeleted=0) {
   let servtime = Date.now()
@@ -237,17 +237,38 @@ async function list(sync_id, hist_id=0, showdeleted=0) {
   )
 
   try {
-    return await got.post(api_url + 'pathlist', {
-      json: {
-        showdeleted: showdeleted,
-        hist_id: hist_id,
-        sync_id: sync_id,
-        offset_metaname_digest: 0,
-        servtime: servtime,
-        access_token: accessData['access_token'],
-        signature: signature
+    // Make listing until offset_metaname_digest_old and last_metaname_digest actual are the same
+    let data_final
+    let offset_metaname_digest_old = 0
+    while ( true ) {
+      let data = await got.post(api_url + 'pathlist', {
+        json: {
+          showdeleted: showdeleted,
+          hist_id: hist_id,
+          sync_id: sync_id,
+          offset_metaname_digest: offset_metaname_digest_old,
+          servtime: servtime,
+          access_token: accessData['access_token'],
+          signature: signature
+        }
+      }).json()
+
+      // Compare
+      //~ console.log("OLD: " + offset_metaname_digest_old)
+      //~ console.log("NEW: " + data['last_metaname_digest'])
+      if(offset_metaname_digest_old == data['last_metaname_digest']) {
+        break
+      } else {
+        // Assign first time JSON if undefined
+        if (data_final == undefined) {
+          data_final = data['pathlist']
+        } else {
+          data_final = data_final.concat(data['pathlist'])
+        }
+        offset_metaname_digest_old = data['last_metaname_digest']
       }
-    }).json()
+    }
+    return data_final
   } catch (ex) {
     console.error(ex)
   }
@@ -977,7 +998,10 @@ async function download_decrypt_chunk(id, offset) {
  */
 
 let mountPath = process.platform !== 'win32' ? './mnt' : 'M:\\'
+//~ Vault ID
 let vaultID = infos[0]['web_sync_id']
+//~ Files ID
+//let vaultID = infos[0]['syncus_sync_id']
 let directories = []
 
 const ops = {
@@ -985,15 +1009,19 @@ const ops = {
     console.log('readdir(%s)', path)
     let values
     let path_modified
+    let list_path
 
     if (path === '/') {
-      // Search for vaultID
-      values = await list(vaultID)
+      // Use an unique way for listing
+      list_path = vaultID
+      values = await list(list_path)
       path_modified = path
     } else {
       // Search for the ID in directories
       let b64_path = new Buffer(path).toString('base64')
-      values = await list(directories[b64_path]['id'])
+      // Use an unique way for listing
+      list_path = directories[b64_path]['id']
+      values = await list(list_path)
       // Add / at end of path
       path_modified = path + '/'      
     }
@@ -1001,7 +1029,7 @@ const ops = {
     // Prepare the list to be displayed
     let listArray = []
 
-    for( let i of values['pathlist'] ) {
+    for( let i of values ) {
       let filename = await filenameDecrypt(i['enc_name'])
 
       // Store path as base64 associative value
