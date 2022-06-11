@@ -32,6 +32,9 @@ require("pidcrypt/rsa")
 require("pidcrypt/asn1")
 const pidCryptUtil = require('pidcrypt/pidcrypt_util');
 
+// npm install prompt-sync
+const prompt = require('prompt-sync')()
+
 const crypto = require('crypto')
 const pathmodule = require('path')
 const util = require('util');
@@ -45,6 +48,7 @@ const fs = require('fs');
 const api_url     = 'https://cp.sync.com/api/?command='
 const username    = process.env.EMAIL
 const password    = process.env.PASSWORD
+const flag2FA     = process.env.FLAG_2FA
 const mtSpeed     = process.env.MTSPEED
 const retryCount  = process.env.RETRYCOUNT
 
@@ -184,12 +188,16 @@ async function authenticate(usernameRaw, password) {
   let username = usernameRaw.toLowerCase()
   const hashPass = await getHashedPassword(await getSalt(username), password)
   try {
+    // If 2FA flag is set redefine two_fa for the OTP code
+    let two_fa = ''
+    if (flag2FA == "true") {
+      two_fa = prompt('2FA: ')
+    }
     const accessData = await got.post(api_url + 'sessionnew', {
       json: {
         username: username,
         password: hashPass,
-        // 2FA is not implemented
-        twofacode: ''
+        twofacode: two_fa
       }
     }).json()
 
