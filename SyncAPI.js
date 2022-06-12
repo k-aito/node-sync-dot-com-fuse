@@ -49,6 +49,7 @@ const api_url     = 'https://cp.sync.com/api/?command='
 const username    = process.env.EMAIL
 const password    = process.env.PASSWORD
 const flag2FA     = process.env.FLAG_2FA
+const displayID   = process.env.DISPLAY_ID
 const mtSpeed     = process.env.MTSPEED
 const retryCount  = process.env.RETRYCOUNT
 
@@ -1006,10 +1007,14 @@ async function download_decrypt_chunk(id, offset) {
  */
 
 let mountPath = process.platform !== 'win32' ? './mnt' : 'M:\\'
-//~ Vault ID
-let vaultID = infos[0]['web_sync_id']
-//~ Files ID
-//let vaultID = infos[0]['syncus_sync_id']
+// Define vaultID based on displayID
+let vaultID
+console.log(displayID)
+if(displayID == 'files') {
+  vaultID = infos[0]['syncus_sync_id']
+} else {
+  vaultID = infos[0]['web_sync_id']
+}
 let directories = []
 
 const ops = {
