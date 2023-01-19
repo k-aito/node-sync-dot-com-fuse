@@ -45,13 +45,14 @@ const fs = require('fs');
  * Variables
  */ 
 
-const api_url     = 'https://cp.sync.com/api/?command='
-const username    = process.env.EMAIL
-const password    = process.env.PASSWORD
-const flag2FA     = process.env.FLAG_2FA
-const displayID   = process.env.DISPLAY_ID
-const mtSpeed     = process.env.MTSPEED
-const retryCount  = process.env.RETRYCOUNT
+const api_url             = 'https://cp.sync.com/api/?command='
+const username            = process.env.EMAIL
+const password            = process.env.PASSWORD
+const flag2FA             = process.env.FLAG_2FA
+const displayID           = process.env.DISPLAY_ID
+const mtSpeed             = process.env.MTSPEED
+const retryCount          = process.env.RETRYCOUNT
+const logEmptyDirectories  = process.env.LOG_EMPTY_DIRECTORIES
 
 let GCM_PACKET_SIZE = 128 * 1024;
 let GCM_PAYLOAD_SIZE = 128 * 1024 - 36;
@@ -1041,6 +1042,14 @@ const ops = {
 
     // Prepare the list to be displayed
     let listArray = []
+
+    // If values is undefined convert it as an empty array and log it in log.txt
+    if (values === undefined) {
+      values = []
+      if (logEmptyDirectories == 'true') {
+        fs.appendFileSync('./log.txt', "WARNING: The path '" + path + "' with id '" + list_path + " is empty.\n");
+      }
+    }
 
     for( let i of values ) {
       let filename = await filenameDecrypt(i['enc_name'])
